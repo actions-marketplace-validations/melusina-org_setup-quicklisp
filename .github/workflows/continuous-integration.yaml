@@ -1,14 +1,21 @@
 name: 'Continuous Integration'
 on:
-  - workflow_dispatch
-  - push
+  workflow_dispatch:
+  push:
+    branches-ignore:
+      - v1
+    tags-ignore:
+      - v1.*
 
 jobs:
   install-quicklisp-on-tier-1-platforms:
     strategy:
       matrix:
-        implementation: ['abcl', 'ecl', 'sbcl']
-        os: ['ubuntu-latest', 'macos-11', 'macos-12', 'macos-13']
+        implementation: ['abcl', 'sbcl']
+        os: ['ubuntu-latest', 'macos-latest']
+        include:
+          - implementation: 'sbcl'
+            os: 'windows-latest'
     runs-on: '${{ matrix.os }}'
     name: 'Install QuickLisp'
     steps:
@@ -23,17 +30,36 @@ jobs:
         id: 'quicklisp'
         with:
           implementation: '${{ matrix.implementation }}'
-      - name: 'Validate installed implementation'
+          additional-systems: >-
+            alexandria
+            org.melusina.confidence
+      - name: 'Ensure that QuickLisp Home exists'
+        shell: sh
         run: |
           test -d '${{ steps.quicklisp.outputs.quicklisp-home }}'
+      - name: 'Ensure that QuickLisp Local Projects exists'
+        shell: sh
+        run: |
           test -d '${{ steps.quicklisp.outputs.quicklisp-local-projects }}'
-
+      - name: 'Ensure that installed systems can be required'
+        shell: sh
+        run: |
+          ./with_lisp_implementation ${{ matrix.implementation }} <<EOF
+          (dolist (package-name '(#:alexandria #:org.melusina.confidence))
+            (require package-name)
+            (format *trace-output* "~&Find package ~A: ~A~&"
+              package-name (find-package package-name)))
+          EOF
+      
   install-quicklisp-on-tier-2-platforms:
     needs: install-quicklisp-on-tier-1-platforms
     strategy:
       matrix:
-        implementation: ['clisp', 'gcl']
-        os: ['ubuntu-latest', 'macos-11', 'macos-12', 'macos-13']
+        implementation: ['clisp', 'ecl', 'gcl']
+        os: ['ubuntu-latest', 'macos-latest']
+        include:
+          - implementation: 'clisp'
+            os: 'windows-latest'
     runs-on: '${{ matrix.os }}'
     name: 'Install QuickLisp'
     steps:
@@ -50,8 +76,27 @@ jobs:
         id: 'quicklisp'
         with:
           implementation: '${{ matrix.implementation }}'
-      - name: 'Validate installed implementation'
+          additional-systems: >-
+            alexandria
+            org.melusina.confidence
+      - name: 'Ensure that QuickLisp Home exists'
         continue-on-error: true
+        shell: sh
         run: |
           test -d '${{ steps.quicklisp.outputs.quicklisp-home }}'
+      - name: 'Ensure that QuickLisp Local Projects exists'
+        continue-on-error: true
+        shell: sh
+        run: |
           test -d '${{ steps.quicklisp.outputs.quicklisp-local-projects }}'
+      - name: 'Ensure that installed systems can be required'
+        continue-on-error: true
+        shell: sh
+        run: |
+          ./with_lisp_implementation ${{ matrix.implementation }} <<EOF
+          (require "alexandria")
+          (require "org.melusina.confidence")
+          (dolist (package-name '("alexandria" "org.melusina.confidence"))
+            (format *trace-output* "~&Find package ~A: ~A~&"
+              package-name (find-package package-name)))
+          EOF

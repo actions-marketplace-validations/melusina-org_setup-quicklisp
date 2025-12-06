@@ -14,30 +14,36 @@
 (require '#:asdf)
 (require '#:uiop)
 
-(load
- (labels
-     ((select-quicklisp (process)
-	(uiop:run-program '("sed" "-n" "-e" "/quicklisp[.]lisp$/{s/^ *//;p;}")
-			  :input (uiop:process-info-output process)
-			  :output :string))
-      (ubuntu-quicklisp ()
-	(select-quicklisp
-	 (uiop:launch-program '("dpkg" "-L" "cl-quicklisp")
-                              :output :stream)))
-      (macports-quicklisp ()
-	(select-quicklisp
-	 (uiop:launch-program '("port" "contents" "cl-quicklisp")
-			      :output :stream)))
-      (find-quicklisp ()
-	(cond
-	  ((uiop:os-macosx-p)
-	   (macports-quicklisp))
-	  ((uiop:os-unix-p)
-	   (ubuntu-quicklisp))))
-      (quicklisp-pathname ()
-	(pathname (string-trim '(#\Space #\Newline #\Return #\Tab)
-			       (find-quicklisp)))))
-   (quicklisp-pathname)))
+(labels
+    ((select-quicklisp (process)
+       (uiop:run-program '("sed" "-n" "-e" "/quicklisp[.]lisp$/{s/^ *//;p;}")
+			 :input (uiop:process-info-output process)
+			 :output :string))
+     (ubuntu-quicklisp ()
+       (select-quicklisp
+	(uiop:launch-program '("dpkg" "-L" "cl-quicklisp")
+                             :output :stream)))
+     (macports-quicklisp ()
+       (select-quicklisp
+	(uiop:launch-program '("port" "contents" "cl-quicklisp")
+			     :output :stream)))
+     (windows-quicklisp ()
+       (namestring
+	(merge-pathnames
+	 #p"quicklisp.lisp"
+	 (uiop:getenv-pathname "GITHUB_ACTION_PATH" :ensure-directory t))))
+     (find-quicklisp ()
+       (cond
+	 ((uiop:os-macosx-p)
+	  (macports-quicklisp))
+	 ((uiop:os-unix-p)
+	  (ubuntu-quicklisp))
+	 ((uiop:os-windows-p)
+	  (windows-quicklisp))))
+     (quicklisp-pathname ()
+       (pathname (string-trim '(#\Space #\Newline #\Return #\Tab)
+			      (find-quicklisp)))))
+  (load (quicklisp-pathname)))
 
 (defpackage #:org.melusina.lisp-action/setup-quicklisp
   (:use #:common-lisp))
@@ -46,10 +52,11 @@
 
 (defparameter *quicklisp-home*
   (or
-   (uiop:getenv "QUICKLISP_HOME")
+   (uiop:getenv-absolute-directory "QUICKLISP_HOME")
+   (uiop:merge-pathnames*
    (merge-pathnames
-    #p"quicklisp/"
-    (user-homedir-pathname)))
+    (make-pathname :directory (list :relative "quicklisp"))
+    (user-homedir-pathname))))
   "Home directory for QuickLisp.")
 
 (defparameter *quicklisp-register-local-projects*
@@ -59,9 +66,21 @@
   "Flag governing registering local projects.")
 
 (defparameter *quicklisp-additional-systems*
-  (when (uiop:getenv "QUICKLISP_ADDITIONAL_SYSTEMS")
-    (uiop:split-string (uiop:getenv "QUICKLISP_ADDITIONAL_SYSTEMS")))
+  (flet ((remove-empty-words (wordlist)
+	   (remove "" wordlist
+		   :test #'string=)))
+    (when (uiop:getenv "QUICKLISP_ADDITIONAL_SYSTEMS")
+      (remove-empty-words
+       (uiop:split-string
+	(uiop:getenv "QUICKLISP_ADDITIONAL_SYSTEMS")))))
   "List of additional packages to install.")
+
+(defun init-file-pathname ()
+  (merge-pathnames
+   (funcall
+    (find-symbol "INIT-FILE-NAME" "QL-IMPL-UTIL"))
+   (user-homedir-pathname)))
+
 
 (defun write-detail (&key name key value)
   "Write detail NAME with VALUE.
@@ -76,24 +95,38 @@ to job output."
 
 (defun install-quicklisp ()
   (quicklisp-quickstart:install :path *quicklisp-home*)
-  (eval
-   (list
-    (find-symbol "WITHOUT-PROMPTING" "QL-UTIL")
-    (list (find-symbol "ADD-TO-INIT-FILE" "QL")))))
+  (flet ((general-case ()
+	   (eval
+	    (list
+	     (find-symbol "WITHOUT-PROMPTING" "QL-UTIL")
+	     (list (find-symbol "ADD-TO-INIT-FILE" "QL")))))
+	 (on-windows-runners ()
+	   (with-open-file (init-file (init-file-pathname)
+				   :direction :output
+				   :if-exists :append :if-does-not-exist :create)
+	     (format init-file ";;; The following lines added by ql:add-to-init-file:~%")
+	     (format init-file "#-quicklisp~%")
+	     (format init-file "(let ((quicklisp-init
+  (merge-pathnames #p~S (user-homedir-pathname))))
+    (when (probe-file quicklisp-init)
+      (load quicklisp-init)))~%" 
+		     (uiop:merge-pathnames*
+		      #p"setup.lisp"
+		      *quicklisp-home*)))))
+    (cond
+      ((uiop:os-windows-p)
+       (on-windows-runners))
+      (t
+       (general-case)))))
 
 (defun register-local-projects ()
   (when *quicklisp-register-local-projects*
     (let ((workspace
-	    (uiop:getenv "GITHUB_WORKSPACE"))
-	  (init-file
-	    (merge-pathnames
-	     (funcall
-	      (find-symbol "INIT-FILE-NAME" "QL-IMPL-UTIL"))
-	     (user-homedir-pathname))))
+	    (uiop:getenv "GITHUB_WORKSPACE")))
       (when workspace
 	(pushnew (pathname workspace)
 		 (symbol-value (find-symbol "*LOCAL-PROJECT-DIRECTORIES*" "QL")))
-	(with-open-file (output init-file
+	(with-open-file (output (init-file-pathname)
 				:direction :output
 				:if-exists :append :if-does-not-exist :create)
 	  (format output "~&#+quicklisp~&(pushnew #p~S ql:*local-project-directories*)"
@@ -111,7 +144,13 @@ to job output."
   (write-detail
    :name "QuickLisp Home"
    :key "quicklisp-home"
-   :value *quicklisp-home*))
+   :value *quicklisp-home*)
+  (write-detail
+   :name "QuickLisp Local Projects"
+   :key "quicklisp-local-projects"
+   :value (uiop:merge-pathnames*
+	   (make-pathname :directory (list :relative "local-projects"))
+	   *quicklisp-home*)))
 
 (progn
   (install-quicklisp)
